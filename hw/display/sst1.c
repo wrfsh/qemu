@@ -6,9 +6,20 @@
 
 #include "qemu/osdep.h"
 #include "qemu/module.h"
+#include "qemu/range.h"
 #include "qom/object.h"
 #include "qapi/error.h"
 #include "hw/pci/pci.h"
+
+#define DEBUG_SST1
+
+#ifdef DEBUG_SST1
+#define DPRINTF(fmt, ...) \
+    do { fprintf(stderr, fmt, ## __VA_ARGS__); } while (0)
+#else
+#define DPRINTF(fmt, ...) \
+    do { } while (0)
+#endif
 
 #define TYPE_SST1_PCI "sst1-pci"
 #define SST1_PCI_BASE(obj) \
@@ -22,6 +33,11 @@
 #define SST1_FRAME_BUFFER_SIZE_MB   4
 #define SST1_TEXTURE_MEMORY_SIZE_MB 8
 
+#define SST1_PCI_INIT_ENABLE        0x40
+
+/**
+ * SST1 device state
+ */
 typedef struct SST1State
 {
     PCIDevice dev;
@@ -30,6 +46,10 @@ typedef struct SST1State
     MemoryRegion mmio;
     MemoryRegion frame_buffer;
     MemoryRegion texture_mem;
+
+    bool pci_fifo_enable;
+    bool fbiinit_enable;
+    bool remap_fbiinit23;
 } SST1State;
 
 static uint64_t sst1_mmio_read(void *opaque, hwaddr addr, unsigned size)
@@ -48,9 +68,41 @@ static const struct MemoryRegionOps sst1_mmio_ops = {
     .valid.min_access_size = 4,
 };
 
+static void sst1_update_init_enable(SST1State *s, uint32_t val)
+{
+    /* bit 0: enable writes to fbiinit registers */
+    s->fbiinit_enable = val & 0x1;
+
+    /* bit 1: enable writes to PCI FIFO */
+    s->pci_fifo_enable = val & 0x2;
+
+    /* bit 2: remap {fbiinit2, fbiinit3} to {dacRead videoChecksum} */
+    s->remap_fbiinit23 = val & 0x4;
+
+    /* TODO */
+    assert((val & ~0x7) == 0);
+}
+
+static void sst1_pci_config_write(PCIDevice *dev, uint32_t addr, uint32_t val, int l)
+{
+    SST1State *s = SST1_PCI_BASE(dev);
+
+    pci_default_write_config(dev, addr, val, l);
+
+    if (ranges_overlap(addr, l, SST1_PCI_INIT_ENABLE, 4)) {
+        DPRINTF("%s: addr = %#x, val = %#x, len = %d\n", __func__, addr, val, l);
+
+        sst1_update_init_enable(s,
+                pci_get_long(dev->config + SST1_PCI_INIT_ENABLE));
+    }
+}
+
 static void sst1_reset(DeviceState *dev)
 {
-    // TODO
+    SST1State *s = SST1_PCI_BASE(dev);
+
+    pci_set_long(s->dev.config + SST1_PCI_INIT_ENABLE, 0);
+    sst1_update_init_enable(s, 0);
 }
 
 static void sst1_realize(PCIDevice *dev, Error **errp)
@@ -91,6 +143,7 @@ static void sst1_class_init(ObjectClass *klass, void *data)
     k->class_id = PCI_CLASS_DISPLAY_OTHER;
     k->vendor_id = PCI_VENDOR_ID_3DFX;
     k->device_id = PCI_DEVICE_ID_3DFX_VOODOO;
+    k->config_write = sst1_pci_config_write;
     k->realize = sst1_realize;
     k->exit = sst1_exit;
 }
