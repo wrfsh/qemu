@@ -35,6 +35,61 @@
 
 #define SST1_PCI_INIT_ENABLE        0x40
 
+#define SST1_FIFO_ENTRY_SIZE        64
+#define SST1_PCI_FIFO_ENTRIES       64
+
+/**
+ * SST1 FIFO control struct
+ */
+typedef struct SST1FifoCtrl
+{
+    uint16_t phead;     /* Next free entry index */
+    uint16_t ptail;     /* Top valid entry index */
+    uint16_t nfree;     /* Number of free slots in fifo */
+    uint16_t nentries;  /* Total size of fifo */
+    void *data;         /* Entry data buffer pointer */
+} SST1FifoCtrl;
+
+/* Reset fifo to empty state */
+static inline void sst1_fifo_reset(SST1FifoCtrl *fifo, uint16_t nentries)
+{
+    fifo->phead = 0;
+    fifo->ptail = 0;
+    fifo->nfree = nentries;
+    fifo->nentries = nentries;
+
+    memset(fifo->data, 0, nentries * SST1_FIFO_ENTRY_SIZE);
+}
+
+/* Reserve space for new entry and return a pointer to it */
+static inline void* sst1_fifo_push(SST1FifoCtrl *fifo)
+{
+    if (fifo->nfree == 0) {
+        return NULL;
+    }
+
+    void *entry = fifo->data + fifo->phead * SST1_FIFO_ENTRY_SIZE;
+    fifo->phead = (fifo->phead + 1) & (fifo->nentries - 1);
+    fifo->nfree -= 1;
+
+    return entry;
+}
+
+/* Remove entry at the top */
+static inline void sst1_fifo_pop(SST1FifoCtrl *fifo)
+{
+    if (fifo->nfree != fifo->nentries) {
+        fifo->ptail = (fifo->ptail + 1) & (fifo->nentries - 1);
+        fifo->nfree += 1;
+    }
+}
+
+/* Return a pointer to top fifo entry */
+static inline void* sst1_fifo_top(const SST1FifoCtrl *fifo)
+{
+    return fifo->data + fifo->ptail * SST1_FIFO_ENTRY_SIZE;
+}
+
 /**
  * SST1 device state
  */
@@ -46,6 +101,9 @@ typedef struct SST1State
     MemoryRegion mmio;
     MemoryRegion frame_buffer;
     MemoryRegion texture_mem;
+
+    SST1FifoCtrl pci_fifo_ctrl;
+    uint8_t pci_fifo[SST1_FIFO_ENTRY_SIZE * SST1_PCI_FIFO_ENTRIES];
 
     bool pci_fifo_enable;
     bool fbiinit_enable;
@@ -101,6 +159,8 @@ static void sst1_reset(DeviceState *dev)
 {
     SST1State *s = SST1_PCI_BASE(dev);
 
+    sst1_fifo_reset(&s->pci_fifo_ctrl);
+
     pci_set_long(s->dev.config + SST1_PCI_INIT_ENABLE, 0);
     sst1_update_init_enable(s, 0);
 }
@@ -126,6 +186,8 @@ static void sst1_realize(PCIDevice *dev, Error **errp)
     memory_region_add_subregion(&s->mapped_base, (SST1_MMIO_SIZE_MB + SST1_FRAME_BUFFER_SIZE_MB) << 20, &s->texture_mem);
 
     pci_register_bar(dev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY, &s->mapped_base);
+
+    s->pci_fifo_ctrl.data = s->pci_fifo;
 }
 
 static void sst1_exit(PCIDevice *dev)
